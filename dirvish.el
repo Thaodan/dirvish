@@ -644,8 +644,11 @@ buffer, it defaults to filename under the cursor when it is nil."
                                (append (list cmd) args)))))
         (if ex (apply #'start-process "" nil "nohup"
                       (cl-substitute file "%f" ex :test 'string=))
-          (let* ((dv (dirvish-curr)) (fn (nth 4 (dv-type dv))))
-            (if fn (funcall fn) (dirvish-kill dv)))
+          (let* ((dv (dirvish-curr))
+                 (fn (and dv (nth 4 (dv-type dv)))))
+            (if fn
+                (funcall fn)
+              (and dv (dirvish-kill dv))))
           (find-file file))))))
 
 (defun dirvish-insert-subdir-a (dirname &rest _)
