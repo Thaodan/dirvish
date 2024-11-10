@@ -6,7 +6,7 @@
 ;; Keywords: files, convenience
 ;; Homepage: https://github.com/alexluigit/dirvish
 ;; SPDX-License-Identifier: GPL-3.0-or-later
-;; Package-Requires: ((emacs "27.1") (transient "0.3.7"))
+;; Package-Requires: ((emacs "27.1") (transient "0.3.7" "async"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -23,6 +23,7 @@
 
 (require 'dired)
 (require 'transient)
+(require 'async)
 (declare-function ansi-color-apply-on-region "ansi-color")
 (declare-function dirvish-fd-find "dirvish-fd")
 (declare-function dirvish-noselect-tramp "dirvish-extras")
@@ -163,13 +164,6 @@ Set it to nil to use the default `mode-line-format'."
   "Whether to hide cursor in dirvish buffers."
   :group 'dirvish :type 'boolean)
 
-(defconst dirvish-emacs-bin
-  (cond
-   ((and invocation-directory invocation-name)
-    (expand-file-name (concat (file-name-as-directory invocation-directory) invocation-name)))
-   ((eq system-type 'darwin)
-    "/Applications/Emacs.app/Contents/MacOS/Emacs")
-   (t "emacs")))
 (defconst dirvish-image-exts '("webp" "wmf" "pcx" "xif" "wbmp" "vtf" "tap" "s1j" "sjp" "sjpg" "s1g" "sgi" "sgif" "s1n" "spn" "spng" "xyze" "rgbe" "hdr" "b16" "mdi" "apng" "ico" "pgb" "rlc" "mmr" "fst" "fpx" "fbs" "dxf" "dwg" "djv" "uvvg" "uvg" "uvvi" "uvi" "azv" "psd" "tfx" "t38" "svgz" "svg" "pti" "btf" "btif" "ktx2" "ktx" "jxss" "jxsi" "jxsc" "jxs" "jxrs" "jxra" "jxr" "jxl" "jpf" "jpx" "jpgm" "jpm" "jfif" "jhc" "jph" "jpg2" "jp2" "jls" "hsj2" "hej2" "heifs" "heif" "heics" "heic" "fts" "fit" "fits" "emf" "drle" "cgm" "dib" "bmp" "hif" "avif" "avcs" "avci" "exr" "fax" "icon" "ief" "jpg" "macp" "pbm" "pgm" "pict" "png" "pnm" "ppm" "ras" "rgb" "tga" "tif" "tiff" "xbm" "xpm" "xwd" "jpe" "jpeg" "cr2" "arw"))
 (defconst dirvish-audio-exts '("ape" "stm" "s3m" "ra" "rm" "ram" "wma" "wax" "m3u" "med" "669" "mtm" "m15" "uni" "ult" "mka" "flac" "axa" "kar" "midi" "mid" "s1m" "smp" "smp3" "rip" "multitrack" "ecelp9600" "ecelp7470" "ecelp4800" "vbk" "pya" "lvp" "plj" "dtshd" "dts" "mlp" "eol" "uvva" "uva" "koz" "xhe" "loas" "sofa" "smv" "qcp" "psid" "sid" "spx" "opus" "ogg" "oga" "mp1" "mpga" "m4a" "mxmf" "mhas" "l16" "lbc" "evw" "enw" "evb" "evc" "dls" "omg" "aa3" "at3" "atx" "aal" "acn" "awb" "amr" "ac3" "ass" "aac" "adts" "726" "abs" "aif" "aifc" "aiff" "au" "mp2" "mp3" "mp2a" "mpa" "mpa2" "mpega" "snd" "vox" "wav"))
 (defconst dirvish-video-exts '("f4v" "rmvb" "wvx" "wmx" "wmv" "wm" "asx" "mk3d" "mkv" "fxm" "flv" "axv" "webm" "viv" "yt" "s1q" "smo" "smov" "ssw" "sswf" "s14" "s11" "smpg" "smk" "bk2" "bik" "nim" "pyv" "m4u" "mxu" "fvt" "dvb" "uvvv" "uvv" "uvvs" "uvs" "uvvp" "uvp" "uvvu" "uvu" "uvvm" "uvm" "uvvh" "uvh" "ogv" "m2v" "m1v" "m4v" "mpg4" "mp4" "mjp2" "mj2" "m4s" "3gpp2" "3g2" "3gpp" "3gp" "avi" "mov" "movie" "mpe" "mpeg" "mpegv" "mpg" "mpv" "qt" "vbs"))
@@ -386,7 +380,6 @@ ALIST is window arguments passed to `window--display-buffer'."
          (ignore-window-parameters t)
          (new-window (split-window-no-error nil size side)))
     (window--display-buffer buffer new-window 'window alist)))
-
 (defun dirvish--kill-buffer (buffer)
   "Kill BUFFER without side effects."
   (and (buffer-live-p buffer)
@@ -495,10 +488,6 @@ ARGS is a list of keyword arguments for `dirvish' struct."
       (cl-loop for (_d . b) in (dv-roots dv)
                when (not (eq b index)) do (kill-buffer b))
       (when-let ((wconf (dv-winconf dv))) (set-window-configuration wconf)))
-    (mapc #'dirvish--kill-buffer (dv-preview-buffers dv))
-    (cl-loop for b in (buffer-list) for bn = (buffer-name b) when
-             (string-match-p (format " ?\\*Dirvish-.*-%s\\*" (dv-name dv)) bn)
-             do (dirvish--kill-buffer b))
     (setq dirvish--parent-hash (make-hash-table :test #'equal))
     (cond (dirvish-reuse-session (setf (dv-winconf dv) nil))
           (t (mapc (pcase-lambda (`(,_ . ,b)) (kill-buffer b)) (dv-roots dv))))
@@ -758,7 +747,8 @@ When FORCE, ensure the preview get refreshed."
 
 (defun dirvish-kill-buffer-h ()
   "Remove buffer from session's buffer list."
-  (when-let ((dv (dirvish-curr)) (buf (current-buffer)))
+  (when-let ((dv (dirvish-curr)) (buf (current-buffer))
+             (kill-buffer-query-functions))
     (let ((win (get-buffer-window buf)))
       (when (window-live-p win) (set-window-dedicated-p win nil)))
     (setf (dv-roots dv) (cl-remove-if (lambda (i) (eq (cdr i) buf)) (dv-roots dv)))
@@ -770,7 +760,10 @@ When FORCE, ensure the preview get refreshed."
       (remhash (dv-name dv) dirvish--session-hash)
       (cl-loop for b in (buffer-list) for bn = (buffer-name b) when
                (string-match-p (format " ?\\*Dirvish-.*-%s\\*" (dv-name dv)) bn)
-               do (dirvish--kill-buffer b))
+               do
+               (cl-letf (((symbol-function 'undo-tree-save-history-from-hook) #'ignore)
+                         ((symbol-function 'recentf-track-closed-file) #'ignore))
+                 (kill-buffer b)))
       (setq dirvish--this nil))))
 
 (defun dirvish-selection-change-h (&optional _frame-or-window)
@@ -864,14 +857,14 @@ When FORCE, ensure the preview get refreshed."
   (let ((p-buf (dirvish--util-buffer 'preview dv nil t)))
     (with-current-buffer p-buf (erase-buffer) (remove-overlays) (cdr recipe))))
 
-(defun dirvish-shell-preview-proc-s (proc _exitcode)
+(defun dirvish-shell-preview-proc-s (result)
   "A sentinel for dirvish preview process.
 When PROC finishes, fill preview buffer with process result."
   (when-let ((dv (or (dirvish-curr) dirvish--this)))
     (with-current-buffer (dirvish--util-buffer 'preview dv nil t)
       (erase-buffer) (remove-overlays)
-      (insert (with-current-buffer (process-buffer proc) (buffer-string)))
-      (pcase (process-get proc 'cmd-info)
+      (insert result)
+      (pcase (process-get async-current-process 'cmd-info)
         ('shell (font-lock-mode -1) (dirvish-apply-ansicolor-h nil (point-min)))
         ('dired
          (setq-local dired-subdir-alist
@@ -879,8 +872,7 @@ When PROC finishes, fill preview buffer with process result."
                      font-lock-defaults
                      '(dired-font-lock-keywords t nil nil beginning-of-line))
          (font-lock-mode 1)
-         (run-hooks 'dirvish-directory-view-mode-hook)))))
-  (kill-buffer (process-buffer proc)))
+         (run-hooks 'dirvish-directory-view-mode-hook))))))
 
 (defun dirvish--run-shell-for-preview (dv recipe)
   "Dispatch shell cmd with RECIPE for session DV."
@@ -1113,7 +1105,7 @@ LEVEL is the depth of current window."
 
 (defsubst dirvish--dir-data-getter (dir)
   "Script for DIR data retrieving."
-  `(with-temp-buffer
+  `(lambda () (with-temp-buffer
      (let ((hash (make-hash-table))
            (bk ,(and (featurep 'dirvish-vc)
                      `(ignore-errors (vc-responsible-backend ,dir)))))
@@ -1135,32 +1127,30 @@ LEVEL is the depth of current window."
                                ,@(and git (list :git-msg git)))
                     hash)))
        (prin1 (cons bk hash) (current-buffer)))
-     (buffer-substring-no-properties (point-min) (point-max))))
+     (buffer-substring-no-properties (point-min) (point-max)))))
 
-(defun dirvish-dir-data-proc-s (proc _exit)
+(defun dirvish-dir-data-proc-s (result)
   "Parse the directory metadata from PROC's output STR."
-  (pcase-let ((`(,buf . ,setup) (process-get proc 'meta))
-              (`(,vc . ,data) (with-current-buffer (process-buffer proc)
-                                (read (buffer-string)))))
+  (pcase-let ((`(,buf . ,setup) (process-get async-current-process 'meta))
+              (`(,vc . ,data) (read result)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (maphash (lambda (k v) (puthash k v dirvish--attrs-hash)) data)
         (when setup
           (dirvish-prop :vc-backend vc)
           (run-hooks 'dirvish-setup-hook))
-        (unless (derived-mode-p 'wdired-mode) (dirvish-update-body-h)))))
-  (delete-process proc)
-  (dirvish--kill-buffer (process-buffer proc)))
+        (unless (derived-mode-p 'wdired-mode) (dirvish-update-body-h))))))
 
 (cl-defgeneric dirvish-data-for-dir (dir buffer setup)
   "Fetch data for files in DIR, stored locally in BUFFER.
 Run `dirvish-setup-hook' afterwards when SETUP is non-nil."
-  (let* ((buf (make-temp-name "dir-data-"))
-         (c (format "%S" `(message "%s" ,(dirvish--dir-data-getter dir))))
-         (proc (make-process :name "dir-data" :connection-type nil :buffer buf
-                             :command (list dirvish-emacs-bin "-Q" "-batch" "--eval" c)
-                             :sentinel 'dirvish-dir-data-proc-s)))
-    (process-put proc 'meta (cons buffer setup))))
+   (cl-letf (((symbol-function 'undo-tree-save-history-from-hook) #'ignore)
+             ((symbol-function 'recentf-track-closed-file) #'ignore))
+     (setq dirvish--attrs-hash (or dirvish--attrs-hash (make-hash-table)))
+     (let*  ((kill-buffer-query-functions)
+             (async-prompt-for-password)
+             (proc (async-start (dirvish--dir-data-getter dir) #'dirvish-dir-data-proc-s)))
+       (process-put proc 'meta (cons buffer setup)))))
 
 (defun dirvish--window-split-order ()
   "Compute the window split order."
